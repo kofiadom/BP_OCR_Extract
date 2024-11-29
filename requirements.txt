@@ -2,4 +2,5 @@ streamlit
 opencv-python 
 groq 
 python-dotenv
-psycopg2
+pandas
+plotly

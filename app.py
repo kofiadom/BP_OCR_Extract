@@ -1,146 +1,132 @@
-from groq import Groq
-import os
-import base64
-from dotenv import load_dotenv
 import streamlit as st
+from database import (
+    create_bp_record,
+    read_bp_records,
+    create_reminder,
+    read_reminders,
+    delete_reminder,
+    list_clinicians,
+)
+import pandas as pd
+import plotly.express as px
+from datetime import datetime, timedelta
+import base64
 import cv2
-import psycopg2
-from psycopg2 import sql
-import json
+from ocr import analyze_image
 
-load_dotenv()
+# Streamlit Page Config
+st.set_page_config(page_title="CardioMed", layout="wide", page_icon="❤️")
 
-api_key=os.getenv('GROQ_API_KEY')
-client = Groq()
+# App Title
+st.title("📊CardioMed")
+st.subheader("Your BP Companion")
 
-# Function to encode the image
-def encode_image(image_file):
-    return base64.b64encode(image_file.read()).decode('utf-8')
+# Sidebar Navigation
+menu = st.sidebar.selectbox(
+    "Menu", 
+    ["Record BP Measurements", "Reminders", "User's History", "Connect with Clinician", "Ask AI Assistant"]
+)
 
-# Database connection setup
-def get_db_connection():
-    conn = psycopg2.connect(
-        dbname=os.getenv('DB_NAME'),
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD'),
-        host=os.getenv('DB_HOST'),
-        port=os.getenv('DB_PORT')
-    )
-    return conn
+# 1. Recording BP Measurements
+if menu == "Record BP Measurements":
+    st.header("Record Your BP Measurements")
 
-def insert_data(systole, diastole, pulse):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    insert_query = sql.SQL("""
-        INSERT INTO blood_pressure_readings (systole, diastole, pulse) 
-        VALUES (%s, %s, %s)
-    """)
-    cursor.execute(insert_query, (systole, diastole, pulse))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # Option to use OCR to get BP data from an image
+    st.subheader("Option 1: Use OCR to Record BP")
+    uploaded_file = st.file_uploader("Upload an image of a blood pressure device", type=["jpg", "jpeg"])
 
-def analyze_image(base64_image):
-   
-    chat_completion = client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        }
-                    }
-                ]
-            }
-        ],
-        temperature=1,
-        max_tokens=1024,
-        top_p=1,
-        stream=False,
-        stop=None,
-    )
+    if uploaded_file is not None: 
+        # Encode the uploaded image 
+        base64_image = base64.b64encode(uploaded_file.read()).decode('utf-8')
+        analyze_image(base64_image)
 
-    result = chat_completion.choices[0].message.content
-    st.write("Raw response:", result)
+    if st.button("Open Camera"):
+        ctx = st.camera_input("Take a photo of the blood pressure device")
+        
+        if ctx:  # Capture the image 
+            img_array = ctx.get_image_data() 
+            image_bytes = cv2.imencode('.jpg', img_array) 
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            analyze_image(base64_image)
 
-    # Parse the JSON result
-    try:
-        data = json.loads(result)
-        if 'error' not in data:
-            systole = data.get('systole')
-            diastole = data.get('diastole')
-            pulse = data.get('pulse')
+    # Manual BP Input Form
+    st.subheader("Option 2: Manual BP Input")
+    with st.form("record_bp_form"):
+        systolic = st.number_input("Systolic Pressure (e.g., 120)", min_value=50, max_value=250, step=1)
+        diastolic = st.number_input("Diastolic Pressure (e.g., 80)", min_value=30, max_value=150, step=1)
+        pulse = st.number_input("Pulse (eg: 80): )", min_value=30, max_value=150, step=1)
+        measurement_time = datetime.now()
+        submitted = st.form_submit_button("Record BP")
 
-            st.subheader("Extracted Blood Pressure Data")
-            st.write(f"Systolic Pressure: {systole}")
-            st.write(f"Diastolic Pressure: {diastole}")
-            st.write(f"Pulse Rate: {pulse}")
+        if submitted:
+            # Risk Calculation Based on WHO's Formula
+            risk_score = 0.5 * systolic + 0.3 * diastolic  # Replace with exact WHO calculation
+            create_bp_record(systolic, diastolic, pulse, risk_score, measurement_time)
+            st.success(f"BP recorded: {systolic}/{diastolic} | Risk Score: {risk_score:.2f}")
 
-            if st.button("Save to Database"):
-                insert_data(systole, diastole, pulse)
-                st.success("Data saved to the database successfully!")
-        else:
-            st.error("Error in the response: " + data.get('error', 'Unknown error'))
-    except json.JSONDecodeError:
-        st.error("Failed to decode JSON response.")
+# 2. Reminders
+elif menu == "Reminders":
+    st.header("Manage Measurement Reminders")
+    st.write("Set reminders to record your BP.")
 
+    # Add Reminder
+    with st.form("add_reminder_form"):
+        reminder_time = st.time_input("Select Time")
+        submitted = st.form_submit_button("Add Reminder")
+        if submitted:
+            reminder_time_str = reminder_time.strftime("%H:%M:%S")
+            create_reminder(reminder_time_str)
+            st.success(f"Reminder set for {reminder_time_str}.")
 
-SYSTEM_PROMPT = """
-Act as an OCR assistant specializing in extracting specific numerical readings from images of blood pressure measuring devices. Analyze the provided image and:  
+    # List and Delete Reminders
+    st.subheader("Your Reminders")
+    reminders = read_reminders()
+    if reminders:
+        for reminder in reminders:
+            st.write(f"Reminder ID: {reminder['id']} | Time: {reminder['time']}")
+            if st.button(f"Delete Reminder {reminder['id']}"):
+                delete_reminder(reminder["id"])
+                st.experimental_rerun()
+    else:
+        st.info("No reminders set.")
 
-1. **Focus on Targeted Values Only:** Identify and extract the numerical values representing:
-   - **Systolic pressure (systole):** The higher numerical value.
-   - **Diastolic pressure (diastole):** The lower numerical value.
-   - **Pulse rate:** Typically displayed as a separate numerical value labeled as pulse or heart rate.
+# 3. User's History
+elif menu == "User's History":
+    st.header("Your BP History")
+    bp_records = read_bp_records()
+    if bp_records:
+        df = pd.DataFrame(bp_records, columns=["id", "systolic", "diastolic", "pulse", "risk_score", "measurement_time"])
+        st.dataframe(df)
 
-2. **Ignore Non-Relevant Data:** Disregard any text, symbols, units (e.g., mmHg, bpm), or other extraneous information. Only extract the three numerical values of interest.
+        # Visualization
+        if st.button("Visualize BP Trends"):
+            fig = px.line(
+                df, 
+                x="measurement_time", 
+                y=["systolic", "diastolic"], 
+                title="BP Trends Over Time",
+                markers=True
+            )
+            st.plotly_chart(fig)
+    else:
+        st.info("No BP records found.")
 
-3. **Format Output:** Return the results as a JSON object in the following structure:
-   ```json
-   {
-     "systole": <systole_value>,
-     "diastole": <diastole_value>,
-     "pulse": <pulse_value>
-   }
-   ```
-   Replace `<systole_value>`, `<diastole_value>`, and `<pulse_value>` with the extracted integers.
+# 4. Connect with Clinician
+elif menu == "Connect with Clinician":
+    st.header("Connect with a Clinician")
+    clinicians = list_clinicians()
 
-4. **Error Handling:** If no clear numerical values for systole, diastole, or pulse can be extracted, respond with:
-   ```json
-   {
-     "error": "Unable to extract values from the image. The display may be unreadable or unclear."
-   }
-   ```
+    if clinicians:
+        for clinician in clinicians:
+            st.write(f"**Name:** {clinician['name']}")
+            st.write(f"**Specialty:** {clinician['specialty']}")
+            st.write(f"**Contact:** {clinician['contact']}")
+            if st.button(f"Connect with {clinician['name']}"):
+                st.success(f"You've connected with {clinician['name']}.")
+    else:
+        st.info("No clinicians available.")
 
-5. **Accuracy and Efficiency:** Prioritize accurate recognition of the specified values while processing the image efficiently.  
-
-Provide only the JSON output without any additional comments or explanations.
-"""
-
-st.title("Blood Pressure OCR Assistant")
-
-uploaded_file = st.file_uploader("Upload an image of a blood pressure device", type=["jpg", "jpeg"])
-
-if uploaded_file is not None: 
-  # Encode the uploaded image 
-  base64_image = encode_image(uploaded_file)
-  analyze_image(base64_image)
-
-ctx = st.camera_input("Take a photo of the blood pressure device")
-
-if ctx: # Capture the image 
-    img_array = ctx.get_image_data() 
-    image_bytes = cv2.imencode('.jpg', img_array) 
-    base64_image = base64.b64encode(image_bytes).decode('utf-8')
-    analyze_image(base64_image)
-
-client = Groq(api_key=api_key)
-
+# 5. Ask AI Assistant
+elif menu == "Ask AI Assistant":
+    st.header("Ask AI Assistant")
+    st.info("This feature is under development.")
